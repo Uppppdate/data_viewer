@@ -2,6 +2,7 @@
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox
+from platform_utils import make_font
 
 
 # ===========================================================================
@@ -36,7 +37,7 @@ class MethodSelectionDialog(tk.Toplevel):
         ext_frame.pack(fill=tk.X, pady=(0, 12))
 
         ttk.Label(ext_frame, text="File extension(s):",
-                  font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+                  font=make_font(10, weight="bold")).pack(side=tk.LEFT)
 
         self.ext_var = tk.StringVar(value=default_extension)
         entry = ttk.Entry(ext_frame, textvariable=self.ext_var, width=24)
@@ -48,7 +49,7 @@ class MethodSelectionDialog(tk.Toplevel):
 
         # ----- Methods -----
         ttk.Label(outer, text="Choose the data to extract:",
-                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W,
+                  font=make_font(10, weight="bold")).pack(anchor=tk.W,
                                                       pady=(0, 6))
 
         wrap = ttk.Frame(outer)
@@ -81,7 +82,7 @@ class MethodSelectionDialog(tk.Toplevel):
             desc = m.get("description", "")
             if desc:
                 tk.Label(row, text=desc, bg="white", fg="#555",
-                         font=("Segoe UI", 9), wraplength=520,
+                         font=make_font(9), wraplength=520,
                          justify=tk.LEFT).pack(anchor=tk.W, padx=(22, 0))
 
         # ----- Bottom buttons -----
@@ -188,7 +189,7 @@ class ParseProgressDialog(tk.Toplevel):
         self.header = ttk.Label(
             frame,
             text=f"Found {total_files} file(s). Parsing…",
-            font=("Segoe UI", 10, "bold"))
+            font=make_font(10, weight="bold"))
         self.header.pack(anchor=tk.W, pady=(0, 8))
 
         self.progress = ttk.Progressbar(
@@ -205,7 +206,7 @@ class ParseProgressDialog(tk.Toplevel):
         list_wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
         self.listbox = tk.Listbox(list_wrap, activestyle="none",
-                                  font=("Consolas", 9))
+                                  font=make_font(10))
         vsb = ttk.Scrollbar(list_wrap, orient="vertical",
                             command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=vsb.set)

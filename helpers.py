@@ -1,10 +1,15 @@
 """Small utility helpers used across the app."""
+import json
 import os
 
 
-# Fallback pixel limits for the panes if font measurement ever fails
 MIN_LEFT_PANE_HARD = 120
 MIN_RIGHT_PANE_HARD = 260
+
+
+# Store recent JSON paths next to the scripts.
+RECENT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "recent_json.json")
 
 
 def elide_left(text, max_px, font_obj):
@@ -30,8 +35,6 @@ def next_available_path(path):
     """Return a path that does not exist yet.
 
     If `path` exists, appends `_2`, `_3`, … before the extension.
-
-        data.json  →  data_2.json  →  data_3.json  →  …
     """
     if not os.path.exists(path):
         return path
@@ -42,3 +45,47 @@ def next_available_path(path):
         if not os.path.exists(candidate):
             return candidate
         i += 1
+
+
+# ---------------------------------------------------------------------------
+# Recent JSON files
+# ---------------------------------------------------------------------------
+def load_recent_paths(max_n=5):
+    """Return up to `max_n` existing recent JSON paths, newest first."""
+    if not os.path.isfile(RECENT_FILE):
+        return []
+    try:
+        with open(RECENT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for p in data:
+        if not isinstance(p, str):
+            continue
+        if not os.path.isfile(p):
+            continue
+        out.append(p)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def save_recent_paths(paths):
+    try:
+        with open(RECENT_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(paths)[:5], f, indent=2)
+    except Exception:
+        pass
+
+
+def push_recent_path(path):
+    """Move `path` to the top of the recent list and save."""
+    path = os.path.abspath(path)
+    paths = load_recent_paths()
+    paths = [p for p in paths if p != path]
+    paths.insert(0, path)
+    save_recent_paths(paths)
+    return paths

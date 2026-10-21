@@ -5,12 +5,13 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from helpers import next_available_path
+from helpers import next_available_path, push_recent_path
 from orca_data import OrcaData
+from orca_parser import find_files, parse_many, PARSER_METHODS
 from welcome_screen import WelcomeScreen
 from main_window import MainWindow
 from parse_dialog import ParseProgressDialog, MethodSelectionDialog
-from orca_parser import find_files, parse_many, PARSER_METHODS
+from platform_utils import maximize, font_family, IS_MAC
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +32,7 @@ class OrcaApp(tk.Tk):
         self._main = None
 
         self._build_style()
+        self._install_menu()
         self._show_welcome()
 
     # ------------------------------------------------------------------
@@ -40,8 +42,7 @@ class OrcaApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-
-        # ---- White backgrounds everywhere ----
+        family = font_family()
         self.configure(bg="white")
         style.configure(".", background="white", foreground="#222")
         style.configure("TFrame", background="white")
@@ -51,26 +52,38 @@ class OrcaApp(tk.Tk):
         style.configure("TNotebook", background="white", borderwidth=0)
         style.configure("TNotebook.Tab",
                         background="white",
-                        focuscolor="white",     # hides the dotted focus ring
+                        focuscolor="white",
                         padding=(14, 6))
         style.map("TNotebook.Tab",
                   background=[("selected", "white"),
                               ("active", "white")],
                   focuscolor=[("focus", "white")])
-
         style.configure("Treeview",
-                        rowheight=22, font=("Segoe UI", 10),
+                        rowheight=22, font=(family, 10),
                         background="white", fieldbackground="white")
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
-
+        style.configure("Treeview.Heading",
+                        font=(family, 10, "bold"))
         style.configure("Summary.TLabel",
-                        font=("Segoe UI", 10), foreground="#333",
+                        font=(family, 10), foreground="#333",
                         background="white")
         style.configure("Title.TLabel",
-                        font=("Segoe UI", 12, "bold"),
+                        font=(family, 12, "bold"),
                         background="white")
         style.configure("Status.TLabel",
                         background="white", foreground="#333")
+
+    # ------------------------------------------------------------------
+    def _install_menu(self):
+        if not IS_MAC:
+            return
+        try:
+            menubar = tk.Menu(self)
+            app_menu = tk.Menu(menubar, name="apple", tearoff=0)
+            menubar.add_cascade(menu=app_menu)
+            self.config(menu=menubar)
+            self.bind("<Command-q>", lambda e: self.destroy())
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     def _show_welcome(self):
@@ -80,6 +93,7 @@ class OrcaApp(tk.Tk):
         self._welcome = WelcomeScreen(
             self,
             on_select_json=self._welcome_select_json,
+            on_select_recent=self._welcome_select_recent,
             on_parse_logs=self._parse_logs)
         self._welcome.pack(fill=tk.BOTH, expand=True)
 
@@ -103,27 +117,15 @@ class OrcaApp(tk.Tk):
             data=self.data,
             json_path=json_path,
             on_open_json=self._main_open_json,
-            on_parse_logs=self._parse_logs)
+            on_parse_logs=self._parse_logs,
+            on_open_json_path=self._load_json_into_main)
         self._main.pack(fill=tk.BOTH, expand=True)
 
         self.lift()
         self.focus_force()
 
     def _maximize(self):
-        self.update_idletasks()
-        try:
-            self.state("zoomed")
-            return
-        except tk.TclError:
-            pass
-        try:
-            self.attributes("-zoomed", True)
-            return
-        except tk.TclError:
-            pass
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        self.geometry(f"{sw}x{sh}+0+0")
+        maximize(self)
 
     # ------------------------------------------------------------------
     def _welcome_select_json(self):
@@ -132,6 +134,9 @@ class OrcaApp(tk.Tk):
             filetypes=[("JSON", "*.json"), ("All files", "*.*")])
         if not path:
             return
+        self._load_json_into_main(path)
+
+    def _welcome_select_recent(self, path):
         self._load_json_into_main(path)
 
     def _main_open_json(self):
@@ -148,10 +153,9 @@ class OrcaApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to read JSON:\n{e}")
             return
+        push_recent_path(path)
         self._show_main(path)
 
-    # ------------------------------------------------------------------
-    # Parsing (background thread + queue polled from the main thread)
     # ------------------------------------------------------------------
     def _parse_logs(self):
         directory = filedialog.askdirectory(
@@ -159,11 +163,10 @@ class OrcaApp(tk.Tk):
         if not directory:
             return
 
-        # ---- Extension + method selection ---------------------------
         sel = MethodSelectionDialog(self, PARSER_METHODS,
                                     default_extension=".log")
         self.wait_window(sel)
-        if sel.result is None:      # cancelled
+        if sel.result is None:
             return
         method_keys = sel.result
         if not method_keys:
@@ -173,7 +176,6 @@ class OrcaApp(tk.Tk):
             return
         extensions = sel.extensions or [".log"]
 
-        # ---- Find matching files ------------------------------------
         files = find_files(directory, extensions)
         if not files:
             messagebox.showwarning(
@@ -182,12 +184,10 @@ class OrcaApp(tk.Tk):
                 f"{', '.join(extensions)} were found in:\n{directory}")
             return
 
-        # ---- Output path --------------------------------------------
         os.makedirs(DATA_DIR, exist_ok=True)
         target = os.path.join(DATA_DIR, "data.json")
         output_path = next_available_path(target)
 
-        # ---- Run in a background thread -----------------------------
         dlg = ParseProgressDialog(self, len(files))
         events = queue.Queue()
         result = {}
@@ -242,12 +242,12 @@ class OrcaApp(tk.Tk):
         if count == 0:
             messagebox.showwarning(
                 "Nothing parsed",
-                "No .log files could be parsed successfully.")
+                "No files could be parsed successfully.")
             return
 
         if messagebox.askyesno(
                 "Parsing complete",
-                f"Parsed {count} .log file(s).\n"
+                f"Parsed {count} file(s).\n"
                 f"Saved to:\n{output_path}\n\n"
                 "Load the results now?"):
             self._load_json_into_main(output_path)

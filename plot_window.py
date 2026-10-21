@@ -2,7 +2,7 @@
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-
+from platform_utils import make_font
 
 # ===========================================================================
 # Common helpers
@@ -143,7 +143,7 @@ def open_series_plot(parent, title, xs, ys, x_label, y_label):
     top = ttk.Frame(win, padding=(10, 6))
     top.pack(side=tk.TOP, fill=tk.X)
     ttk.Label(top, text=title,
-              font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+              font=make_font(10, weight="bold")).pack(side=tk.LEFT)
 
     Figure, Canvas, err = _try_import_mpl()
     if Figure is not None:
@@ -186,7 +186,7 @@ def open_line_plot(parent, title, xs, ys, x_label, y_label):
     top = ttk.Frame(win, padding=(10, 6))
     top.pack(side=tk.TOP, fill=tk.X)
     ttk.Label(top, text=title,
-              font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+              font=make_font(10, weight="bold")).pack(side=tk.LEFT)
 
     Figure, Canvas, err = _try_import_mpl()
     if Figure is not None:

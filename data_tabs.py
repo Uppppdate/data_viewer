@@ -1,14 +1,9 @@
-"""Generic data-display tabs for arbitrary parser methods.
-
-Rules:
-    * list of dicts          -> SeriesTab   (table + Plot button)
-    * dict of dicts          -> NestedTab   (tree, like Thermochemistry)
-    * flat dict / scalar     -> pushed into the General Data tab
-"""
+"""Generic data-display tabs for arbitrary parser methods."""
 import tkinter as tk
 from tkinter import ttk
 
 from plot_window import open_series_plot
+from platform_utils import make_font
 
 
 def detect_kind(value):
@@ -26,13 +21,41 @@ def detect_kind(value):
 
 
 # ===========================================================================
+# Shared right-click helper
+# ===========================================================================
+def _bind_right_click(tree, handler):
+    """Bind secondary-click events on macOS, Linux and Windows."""
+    for seq in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
+        tree.bind(seq, handler)
+
+
+def _value_at(tree, event):
+    """Return the text of the tree cell under the mouse, or ''."""
+    iid = tree.identify_row(event.y)
+    col = tree.identify_column(event.x)
+    if not iid or not col:
+        return ""
+    if col == "#0":
+        return str(tree.item(iid, "text")).strip()
+    try:
+        idx = int(col[1:]) - 1
+        cols = list(tree["columns"])
+        if idx < 0 or idx >= len(cols):
+            return ""
+        return str(tree.set(iid, cols[idx])).strip()
+    except (ValueError, IndexError):
+        return ""
+
+
+# ===========================================================================
 class SeriesTab(ttk.Frame):
     """List-of-dicts data with a Plot button."""
 
-    def __init__(self, master, title, series):
+    def __init__(self, master, title, series, on_copy=None):
         super().__init__(master)
         self.title = title
         self.series = series
+        self.on_copy = on_copy
 
         top = ttk.Frame(self, padding=(4, 4))
         top.pack(fill=tk.X)
@@ -79,13 +102,23 @@ class SeriesTab(ttk.Frame):
             self.tree.insert("", "end", values=values,
                              tags=(tag,) if tag else ())
 
-    # ------------------------------------------------------------------
+        _bind_right_click(self.tree, self._on_right_click)
+
     def _update_plot_button_state(self):
         self.plot_btn.config(
             state=tk.NORMAL if len(self.series) > 1 else tk.DISABLED)
 
+    def _on_right_click(self, event):
+        value = _value_at(self.tree, event)
+        if not value:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update_idletasks()
+        if self.on_copy:
+            self.on_copy("Value copied")
+
     def _pick_columns(self):
-        """Guess x/y columns from the keys."""
         if not self.series:
             return None, None
         cols = list(self.series[0].keys())
@@ -131,9 +164,10 @@ class SeriesTab(ttk.Frame):
 class NestedTab(ttk.Frame):
     """dict-of-dicts data shown as a tree (like Thermochemistry)."""
 
-    def __init__(self, master, title, data):
+    def __init__(self, master, title, data, on_copy=None):
         super().__init__(master)
         self.title = title
+        self.on_copy = on_copy
 
         top = ttk.Frame(self, padding=(4, 4))
         top.pack(fill=tk.X)
@@ -161,15 +195,14 @@ class NestedTab(ttk.Frame):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.tree.tag_configure("cat", background="#eef3fa",
-                                font=("Segoe UI", 10, "bold"))
+                                font=make_font(10, weight="bold"))
         self.tree.tag_configure("odd", background="#f7f7f7")
 
-        leaf_idx = 0
+        self._leaf_idx = 0
         for k, v in data.items():
             self._populate("", k, v, is_root=True)
-        # Note: recursion is inside _populate below, leaf_idx handled there.
 
-        self._leaf_idx = 0   # reset for consistency
+        _bind_right_click(self.tree, self._on_right_click)
 
     def _populate(self, parent, key, value, is_root=False):
         if isinstance(value, dict):
@@ -189,6 +222,16 @@ class NestedTab(ttk.Frame):
             self.tree.insert(parent, "end", text="  " + str(key),
                              values=(vtext,), tags=(tag,) if tag else ())
             self._leaf_idx += 1
+
+    def _on_right_click(self, event):
+        value = _value_at(self.tree, event)
+        if not value:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update_idletasks()
+        if self.on_copy:
+            self.on_copy("Value copied")
 
     def _expand_all(self):
         for iid in self.tree.get_children(""):
@@ -211,8 +254,9 @@ class NestedTab(ttk.Frame):
 class GeneralTab(ttk.Frame):
     """Aggregates flat key->value data from all flat methods."""
 
-    def __init__(self, master):
+    def __init__(self, master, on_copy=None):
         super().__init__(master)
+        self.on_copy = on_copy
 
         wrap = ttk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True)
@@ -231,8 +275,20 @@ class GeneralTab(ttk.Frame):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.tree.tag_configure("group", background="#eef3fa",
-                                font=("Segoe UI", 10, "bold"))
+                                font=make_font(10, weight="bold"))
         self.tree.tag_configure("odd", background="#f7f7f7")
+
+        _bind_right_click(self.tree, self._on_right_click)
+
+    def _on_right_click(self, event):
+        value = _value_at(self.tree, event)
+        if not value:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update_idletasks()
+        if self.on_copy:
+            self.on_copy("Value copied")
 
     def populate(self, groups):
         """groups is a list of (title, flat_dict)."""

@@ -6,7 +6,7 @@ value versus temperature.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
-
+from platform_utils import make_font
 from plot_window import open_line_plot
 
 

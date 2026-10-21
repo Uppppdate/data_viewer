@@ -9,6 +9,7 @@ from tkinter import (ttk, messagebox, filedialog, simpledialog,
 
 from table_grid import TableGrid
 from reaction_store import get_store
+from platform_utils import make_font, maximize, wheel_units, IS_MAC, is_s_key
 
 
 # ===========================================================================
@@ -66,13 +67,16 @@ def short_name(key):
     base = base.split("/")[-1]
     return os.path.splitext(base)[0]
 
+def _normalize_key(key):
+    """Normalize path separators so keys compare across platforms."""
+    return key.replace("\\", "/")
 
 # ===========================================================================
 # Auto-sized, drag-locked Treeview wrapper
 # ===========================================================================
 class AutoSizeTree:
     def __init__(self, tree, cell_font, header_font,
-                 padding=24, min_width=50):
+                 padding=24, min_width=40):
         self.tree = tree
         self.cell_font = cell_font
         self.header_font = header_font
@@ -124,37 +128,20 @@ class AutoSizeTree:
                 w = max(w, self.cell_font.measure(str(text)))
             w = max(self.min_width, w + self.padding)
             try:
-                self.tree.column(col_id, width=w, minwidth=w,
-                                 stretch=False)
+                self.tree.column(col_id, width=w, minwidth=self.min_width,
+                                 stretch=True)
             except tk.TclError:
                 pass
-
-    def total_width(self):
-        total = 0
-        try:
-            show = self._show_list()
-            if "tree" in show:
-                total += int(self.tree.column("#0", "width"))
-            for c in self.tree["columns"]:
-                total += int(self.tree.column(c, "width"))
-        except tk.TclError:
-            pass
-        return total
 
 
 # ===========================================================================
 # Window
 # ===========================================================================
 class AnalysisWindow(tk.Toplevel):
-    EDITOR_WIDTH = 780
-    EDITOR_HEIGHT = 300
-    SAVED_WIDTH = 780
-    SAVED_HEIGHT = 300
-
     def __init__(self, master, data, favorites):
         super().__init__(master)
         self.title("Reaction Analysis")
-        self.minsize(1100, 720)
+        self.minsize(1000, 640)
         self.configure(bg="white")
 
         self.data = data
@@ -169,9 +156,8 @@ class AnalysisWindow(tk.Toplevel):
         self._quantities_display = {}
         self._locked_quantity_path = None
 
-        self._cell_font = tkfont.Font(family="Segoe UI", size=10)
-        self._header_font = tkfont.Font(family="Segoe UI", size=10,
-                                        weight="bold")
+        self._cell_font = make_font(10)
+        self._header_font = make_font(10, weight="bold")
 
         self._saved_sort_col = "delta"
         self._saved_sort_reverse = False
@@ -189,65 +175,48 @@ class AnalysisWindow(tk.Toplevel):
         # ----- hotkeys -----
         self.bind("<Return>", self._hotkey_return)
         self.bind("<KP_Enter>", self._hotkey_return)
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.saved_tree.bind("<Return>", self._hotkey_return)
+        self.saved_tree.bind("<KP_Enter>", self._hotkey_return)
 
-        # Ctrl+S. bind_all is the most reliable way to catch the event
-        # regardless of which descendant widget has focus. The handler
-        # itself checks that the focus belongs to this window, so it
-        # does nothing if another Toplevel is on top.
-        self.bind_all("<Control-s>", self._hotkey_save, add="+")
-        self.bind_all("<Control-S>", self._hotkey_save, add="+")
+        # Layout-independent Cmd/Ctrl + S: fires for any keypress, we
+        # check inside that the physical key is S and that the event
+        # originated in this window.
+        self.bind_all("<Command-KeyPress>", self._on_cmd_keypress, add="+")
+        self.bind_all("<Control-KeyPress>", self._on_cmd_keypress, add="+")
 
-        # Clean up the global binding when the window closes.
+        # Delete / Backspace on the saved-reactions list.
+        for seq in ("<Delete>", "<BackSpace>"):
+            try:
+                self.saved_tree.bind(seq,
+                                     lambda e: self._delete_selected())
+            except tk.TclError:
+                pass
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
         self.after(50, self.focus_force)
 
-    # ------------------------------------------------------------------
     def _on_close(self):
-        """Remove our global Ctrl+S bindings and close."""
-        try:
-            self.unbind_all("<Control-s>")
-            self.unbind_all("<Control-S>")
-        except tk.TclError:
-            pass
         self.destroy()
 
+    def _on_cmd_keypress(self, event=None):
+        if event is None or not is_s_key(event):
+            return None
+        w = event.widget
+        while w is not None:
+            if w is self:
+                break
+            w = getattr(w, "master", None)
+        else:
+            return None
+        self._save_current()
+        return "break"
+
     def _finalize_initial_layout(self):
-        self._result_autosize.autosize()
         self._saved_autosize.autosize()
-        self._adjust_result_width()
-        self._result_grid.update()
         self._saved_grid.update()
 
     def _maximize(self):
-        self.update_idletasks()
-        try:
-            self.state("zoomed")
-            return
-        except tk.TclError:
-            pass
-        try:
-            self.attributes("-zoomed", True)
-            return
-        except tk.TclError:
-            pass
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        self.geometry(f"{sw}x{sh}+0+0")
-
-    def _focus_is_inside(self):
-        """Return True if the currently focused widget is inside us."""
-        try:
-            focused = self.focus_get()
-        except tk.TclError:
-            return False
-        w = focused
-        while w is not None:
-            if w is self:
-                return True
-            w = getattr(w, "master", None)
-        return False
+        maximize(self)
 
     def _hotkey_return(self, event=None):
         focused = self.focus_get()
@@ -261,16 +230,6 @@ class AnalysisWindow(tk.Toplevel):
         self._recalculate()
         return "break"
 
-    def _hotkey_save(self, event=None):
-        """Ctrl+S — only acts when the focus is inside this window."""
-        if not self._focus_is_inside():
-            return None
-        try:
-            self._save_current()
-        except tk.TclError:
-            pass
-        return "break"
-
     # ==================================================================
     # Layout
     # ==================================================================
@@ -280,26 +239,30 @@ class AnalysisWindow(tk.Toplevel):
 
         outer.rowconfigure(0, weight=3)
         outer.rowconfigure(1, weight=2)
-        outer.columnconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=3)
+        outer.columnconfigure(1, weight=2)
 
-        top = ttk.Frame(outer)
-        top.grid(row=0, column=0, sticky="nsew")
+        top_left = ttk.Frame(outer)
+        top_left.grid(row=0, column=0, sticky="nsew",
+                      padx=(0, 4), pady=(0, 4))
+        self._build_editor(top_left)
+
+        top_right = ttk.Frame(outer)
+        top_right.grid(row=0, column=1, sticky="nsew",
+                       padx=(4, 0), pady=(0, 4))
+        self._build_scheme(top_right)
 
         bottom = ttk.Frame(outer)
-        bottom.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-
-        self._build_editor(top)
+        bottom.grid(row=1, column=0, columnspan=2, sticky="nsew",
+                    pady=(4, 0))
         self._build_saved(bottom)
 
-    # ---------------- Top: equation editor ----------------
     def _build_editor(self, parent):
         ttk.Label(parent, text="Reaction equation",
-                  font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
+                  font=make_font(11, weight="bold")).pack(anchor=tk.W)
 
-        builder = ttk.Frame(parent, width=self.EDITOR_WIDTH,
-                            height=self.EDITOR_HEIGHT)
-        builder.pack(anchor=tk.NW, pady=(4, 8))
-        builder.pack_propagate(False)
+        builder = ttk.Frame(parent)
+        builder.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
 
         hdr = ttk.Frame(builder, padding=(4, 2))
         hdr.pack(fill=tk.X)
@@ -307,14 +270,13 @@ class AnalysisWindow(tk.Toplevel):
         hdr.grid_columnconfigure(1, minsize=64)
         hdr.grid_columnconfigure(2, minsize=110)
         hdr.grid_columnconfigure(3, weight=1)
-        ttk.Label(hdr, text="Incl.", font=("Segoe UI", 9, "bold")).grid(
+        ttk.Label(hdr, text="Incl.", font=make_font(9, weight="bold")).grid(
             row=0, column=0, sticky="w")
-        ttk.Label(hdr, text="Coef", font=("Segoe UI", 9, "bold")).grid(
+        ttk.Label(hdr, text="Coef", font=make_font(9, weight="bold")).grid(
             row=0, column=1, sticky="w", padx=(4, 0))
-        ttk.Label(hdr, text="Side", font=("Segoe UI", 9, "bold")).grid(
+        ttk.Label(hdr, text="Side", font=make_font(9, weight="bold")).grid(
             row=0, column=2, sticky="w")
-        ttk.Label(hdr, text="Log file",
-                  font=("Segoe UI", 9, "bold")).grid(
+        ttk.Label(hdr, text="Log file", font=make_font(9, weight="bold")).grid(
             row=0, column=3, sticky="w", padx=(4, 0))
 
         canvas_row = ttk.Frame(builder)
@@ -333,23 +295,21 @@ class AnalysisWindow(tk.Toplevel):
         self._rows_inner = inner
         self._rows_canvas = canvas
         win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind(
-            "<Configure>",
-            lambda e: canvas.itemconfigure(win_id, width=e.width))
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win_id, width=e.width))
 
         self._populate_rows()
         self._bind_wheel(canvas)
 
         qframe = ttk.Frame(parent)
-        qframe.pack(fill=tk.X, pady=(0, 6))
+        qframe.pack(fill=tk.X, pady=(4, 0))
         ttk.Label(qframe, text="Quantity:").pack(side=tk.LEFT)
         self.quantity_var = tk.StringVar()
         self.quantity_cb = ttk.Combobox(qframe,
                                         textvariable=self.quantity_var,
-                                        state="readonly", width=80)
+                                        state="readonly", width=60)
         self.quantity_cb.pack(side=tk.LEFT, padx=(6, 8), fill=tk.X,
                               expand=True)
         self.quantity_cb.bind("<<ComboboxSelected>>",
@@ -357,77 +317,147 @@ class AnalysisWindow(tk.Toplevel):
         ttk.Button(qframe, text="Recalculate",
                    command=self._recalculate).pack(side=tk.LEFT)
 
-        result_row = ttk.Frame(parent)
-        result_row.pack(fill=tk.BOTH, expand=True)
+    def _build_scheme(self, parent):
+        ttk.Label(parent, text="Reaction scheme",
+                  font=make_font(11, weight="bold")).pack(anchor=tk.W)
 
-        rw = ttk.Frame(result_row)
-        rw.pack(side=tk.LEFT, fill=tk.Y)
-        rw.pack_propagate(False)
-        rw.configure(width=520)
-        self._result_wrap = rw
+        banner = tk.Frame(parent, bg="#eef6ff", bd=2, relief="groove")
+        banner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
-        ttk.Label(rw, text="Result",
-                  font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
-
-        table_wrap = ttk.Frame(rw)
-        table_wrap.pack(fill=tk.BOTH, expand=True)
-
-        cols = ("coef", "side", "value", "contrib")
-        self.result_tree = ttk.Treeview(table_wrap, columns=cols,
-                                        show="headings",
-                                        selectmode="browse")
-        for c, t in (("coef", "Coef"),
-                     ("side", "Side"),
-                     ("value", "Value (per molecule)"),
-                     ("contrib", "Contribution to Δ")):
-            self.result_tree.heading(c, text=t)
-            self.result_tree.column(c, width=100, anchor=tk.CENTER)
-
-        vsb2 = ttk.Scrollbar(table_wrap, orient="vertical",
-                             command=self.result_tree.yview)
-        self.result_tree.configure(yscrollcommand=vsb2.set)
-        vsb2.pack(side=tk.RIGHT, fill=tk.Y)
-        self.result_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.result_tree.tag_configure("reactant", background="#eaf4ff")
-        self.result_tree.tag_configure("product", background="#eafdea")
-        self.result_tree.tag_configure("total", background="#f0f0f0",
-                                       font=("Segoe UI", 10, "bold"))
-        self.result_tree.tag_configure("delta", background="#fff6d6",
-                                       font=("Segoe UI", 10, "bold"))
-
-        self._result_grid = TableGrid(self.result_tree, table_wrap)
-        self._result_autosize = AutoSizeTree(
-            self.result_tree, self._cell_font, self._header_font)
-
-        banner = tk.Frame(result_row, bg="#eef6ff", bd=2, relief="groove")
-        banner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
-
-        tk.Label(banner, text="Reaction scheme",
-                 font=("Segoe UI", 10, "bold"),
-                 bg="#eef6ff", fg="#1a2230").pack(
-            anchor=tk.W, padx=14, pady=(10, 0))
-
+        # Equation
         self.equation_label = tk.Label(
             banner, text="—", bg="#eef6ff", fg="#1a2230",
-            font=("Consolas", 16, "bold"),
-            anchor=tk.NW, justify=tk.LEFT, wraplength=900)
-        self.equation_label.pack(fill=tk.BOTH, expand=True,
-                                 padx=14, pady=(6, 4))
+            font=make_font(14, weight="bold"),
+            anchor=tk.CENTER, justify=tk.CENTER, wraplength=500)
+        self.equation_label.pack(fill=tk.X, padx=14, pady=(14, 10))
 
-        self.delta_label = tk.Label(
-            banner, text="", bg="#eef6ff", fg="#a03000",
-            font=("Consolas", 14, "bold"),
-            anchor=tk.W, justify=tk.LEFT)
-        self.delta_label.pack(fill=tk.X, padx=14, pady=(0, 12))
+        # Separator
+        tk.Frame(banner, bg="#c0d0e0", height=1).pack(
+            fill=tk.X, padx=14, pady=(0, 10))
 
-        self.summary_label = ttk.Label(parent, text="", justify=tk.LEFT,
-                                       font=("Consolas", 10))
-        self.summary_label.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+        # Result table
+        result_frame = tk.Frame(banner, bg="#eef6ff")
+        result_frame.pack(fill=tk.X, padx=14, pady=(0, 14))
+        result_frame.columnconfigure(0, weight=1)
+
+        hdr_bg = "#eef6ff"
+        hdr_fg = "#6a7b8c"
+        hdr_font = make_font(9, weight="bold")
+
+        tk.Label(result_frame, text="Quantity", bg=hdr_bg, fg=hdr_fg,
+                 font=hdr_font, anchor="w").grid(
+            row=0, column=0, sticky="w", pady=(0, 4))
+        tk.Label(result_frame, text="Value", bg=hdr_bg, fg=hdr_fg,
+                 font=hdr_font, anchor="e").grid(
+            row=0, column=1, sticky="e", pady=(0, 4))
+
+        tk.Frame(result_frame, bg="#c0d0e0", height=1).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+
+        row_font = make_font(10)
+        val_font = make_font(10, weight="bold")
+
+        tk.Label(result_frame, text="Reactants sum",
+                 bg=hdr_bg, fg="#1a2230",
+                 font=row_font, anchor="w").grid(
+            row=2, column=0, sticky="w", pady=2)
+        self._react_value = tk.Label(
+            result_frame, text="—", bg=hdr_bg, fg="#1a2230",
+            font=val_font, anchor="e")
+        self._react_value.grid(row=2, column=1, sticky="e", pady=2)
+
+        tk.Label(result_frame, text="Products sum",
+                 bg=hdr_bg, fg="#1a2230",
+                 font=row_font, anchor="w").grid(
+            row=3, column=0, sticky="w", pady=2)
+        self._prod_value = tk.Label(
+            result_frame, text="—", bg=hdr_bg, fg="#1a2230",
+            font=val_font, anchor="e")
+        self._prod_value.grid(row=3, column=1, sticky="e", pady=2)
+
+        tk.Frame(result_frame, bg="#c0d0e0", height=1).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+
+        delta_font = make_font(12, weight="bold")
+        tk.Label(result_frame, text="Δ (P − R)",
+                 bg=hdr_bg, fg="#a03000",
+                 font=delta_font, anchor="w").grid(
+            row=5, column=0, sticky="w")
+        self._delta_value = tk.Label(
+            result_frame, text="—", bg=hdr_bg, fg="#a03000",
+            font=delta_font, anchor="e")
+        self._delta_value.grid(row=5, column=1, sticky="e")
+
+    def _build_saved(self, parent):
+        ttk.Label(parent, text="Saved reactions",
+                  font=make_font(11, weight="bold")).pack(anchor=tk.W)
+
+        bar = ttk.Frame(parent)
+        bar.pack(fill=tk.X, pady=(4, 4))
+
+        ttk.Button(bar, text="Save current reaction  (Cmd+S)",
+                   command=self._save_current).pack(side=tk.LEFT)
+        ttk.Button(bar, text="Load  (Enter)",
+                   command=lambda: self._load_selected(keep_focus=True)
+                   ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(bar, text="Delete  (Del)",
+                   command=self._delete_selected).pack(side=tk.LEFT,
+                                                       padx=(6, 0))
+        ttk.Button(bar, text="Clear",
+                   command=self._clear_reactions).pack(side=tk.LEFT,
+                                                       padx=(6, 0))
+        ttk.Button(bar, text="Export to CSV…",
+                   command=self._export_csv).pack(side=tk.LEFT,
+                                                  padx=(6, 0))
+        ttk.Button(bar, text="Load reactions from CSV…",
+                   command=self._import_csv).pack(side=tk.LEFT,
+                                                  padx=(6, 0))
+
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        cols = ("quantity", "reactants", "products", "delta")
+        self.saved_tree = ttk.Treeview(wrap, columns=cols,
+                                       show="tree headings",
+                                       selectmode="browse")
+        self.saved_tree.heading("#0", text="Name",
+                                command=lambda: self._sort_by_column("#0"))
+        self.saved_tree.heading(
+            "quantity", text="Quantity",
+            command=lambda: self._sort_by_column("quantity"))
+        self.saved_tree.heading(
+            "reactants", text="Reactants",
+            command=lambda: self._sort_by_column("reactants"))
+        self.saved_tree.heading(
+            "products", text="Products",
+            command=lambda: self._sort_by_column("products"))
+        self.saved_tree.heading(
+            "delta", text="Δ (P − R)",
+            command=lambda: self._sort_by_column("delta"))
+
+        for c in cols:
+            self.saved_tree.column(c, width=120, anchor=tk.W)
+        self.saved_tree.column("#0", width=150, anchor=tk.W)
+
+        vsb = ttk.Scrollbar(wrap, orient="vertical",
+                            command=self.saved_tree.yview)
+        self.saved_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.saved_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.saved_tree.tag_configure("odd", background="#f7f7f7")
+
+        self.saved_tree.bind(
+            "<Double-1>",
+            lambda e: self._load_selected(keep_focus=True))
+
+        self._saved_grid = TableGrid(self.saved_tree, wrap)
+        self._saved_autosize = AutoSizeTree(
+            self.saved_tree, self._cell_font, self._header_font)
 
     def _bind_wheel(self, canvas):
         def _wheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            canvas.yview_scroll(wheel_units(e.delta), "units")
         def _up(e):
             canvas.yview_scroll(-1, "units")
         def _down(e):
@@ -501,83 +531,6 @@ class AnalysisWindow(tk.Toplevel):
             "coef": coef_var,
             "side": side_var,
         }
-
-    # ---------------- Bottom: saved reactions ----------------
-    def _build_saved(self, parent):
-        ttk.Label(parent, text="Saved reactions",
-                  font=("Segoe UI", 11, "bold")).pack(anchor=tk.W,
-                                                      pady=(4, 4))
-
-        bar = ttk.Frame(parent)
-        bar.pack(fill=tk.X, pady=(0, 4))
-
-        ttk.Button(bar, text="Save current reaction  (Ctrl+S)",
-                   command=self._save_current).pack(side=tk.LEFT)
-        ttk.Button(bar, text="Load  (Enter)",
-                   command=lambda: self._load_selected(keep_focus=True)
-                   ).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(bar, text="Delete  (Del)",
-                   command=self._delete_selected).pack(side=tk.LEFT,
-                                                       padx=(6, 0))
-        ttk.Button(bar, text="Clear",
-                   command=self._clear_reactions).pack(side=tk.LEFT,
-                                                       padx=(6, 0))
-        ttk.Button(bar, text="Export to CSV…",
-                   command=self._export_csv).pack(side=tk.LEFT,
-                                                  padx=(6, 0))
-        ttk.Button(bar, text="Load reactions from CSV…",
-                   command=self._import_csv).pack(side=tk.LEFT,
-                                                  padx=(6, 0))
-
-        saved_outer = ttk.Frame(parent, width=self.SAVED_WIDTH,
-                                height=self.SAVED_HEIGHT)
-        saved_outer.pack(anchor=tk.NW)
-        saved_outer.pack_propagate(False)
-
-        wrap = ttk.Frame(saved_outer)
-        wrap.pack(fill=tk.BOTH, expand=True)
-        self._saved_wrap = wrap
-
-        cols = ("quantity", "reactants", "products", "delta")
-        self.saved_tree = ttk.Treeview(wrap, columns=cols,
-                                       show="tree headings",
-                                       selectmode="browse")
-        self.saved_tree.heading("#0", text="Name",
-                                command=lambda: self._sort_by_column("#0"))
-        self.saved_tree.heading(
-            "quantity", text="Quantity",
-            command=lambda: self._sort_by_column("quantity"))
-        self.saved_tree.heading(
-            "reactants", text="Reactants",
-            command=lambda: self._sort_by_column("reactants"))
-        self.saved_tree.heading(
-            "products", text="Products",
-            command=lambda: self._sort_by_column("products"))
-        self.saved_tree.heading(
-            "delta", text="Δ (P − R)",
-            command=lambda: self._sort_by_column("delta"))
-
-        for c in cols:
-            self.saved_tree.column(c, width=130, anchor=tk.W)
-        self.saved_tree.column("#0", width=160, anchor=tk.W)
-
-        vsb = ttk.Scrollbar(wrap, orient="vertical",
-                            command=self.saved_tree.yview)
-        self.saved_tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.saved_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.saved_tree.tag_configure("odd", background="#f7f7f7")
-
-        self.saved_tree.bind("<Delete>",
-                             lambda e: self._delete_selected())
-        self.saved_tree.bind(
-            "<Double-1>",
-            lambda e: self._load_selected(keep_focus=True))
-
-        self._saved_grid = TableGrid(self.saved_tree, wrap)
-        self._saved_autosize = AutoSizeTree(
-            self.saved_tree, self._cell_font, self._header_font)
 
     # ==================================================================
     # Quantities
@@ -659,8 +612,9 @@ class AnalysisWindow(tk.Toplevel):
 
             value = None
             source = "json"
-            if key in self.data.raw:
-                value = get_value(self.data.raw[key], path)
+            real_key = self._find_existing_key(key)
+            if real_key is not None:
+                value = get_value(self.data.raw[real_key], path)
 
             if value is None:
                 cached = self._row_values.get(key)
@@ -714,82 +668,25 @@ class AnalysisWindow(tk.Toplevel):
             (r_terms if r["side"] == "Reactant" else p_terms).append(term)
         left = " + ".join(r_terms) or "∅"
         right = " + ".join(p_terms) or "∅"
-        return f"{left}  →  {right}"
+        return f"{left}   →   {right}"
 
     def _update_equation_banner(self, data=None):
         if data is None:
             self.equation_label.config(text="—")
-            self.delta_label.config(text="")
+            self._react_value.config(text="—")
+            self._prod_value.config(text="—")
+            self._delta_value.config(text="—")
             return
         self.equation_label.config(text=self._equation_text(data))
-        self.delta_label.config(
-            text=f"Δ = {data['delta']:+.8f}   "
-                 f"(Products {data['products_sum']:+.6f} − "
-                 f"Reactants {data['reactants_sum']:+.6f})")
-
-    def _adjust_result_width(self):
-        total = self._result_autosize.total_width()
-        if total <= 0:
-            return
-        self._result_wrap.configure(width=max(280, total + 22))
+        self._react_value.config(
+            text=f"{data['reactants_sum']:+.8f}")
+        self._prod_value.config(
+            text=f"{data['products_sum']:+.8f}")
+        self._delta_value.config(text=f"{data['delta']:+.8f}")
 
     def _recalculate(self):
         data = self._compute_current()
-        self.result_tree.delete(*self.result_tree.get_children(""))
-
-        if data is None:
-            self.summary_label.config(text="Pick a quantity first.")
-            self._update_equation_banner(None)
-            self._result_autosize.autosize()
-            self._adjust_result_width()
-            self._result_grid.update()
-            return
-
-        for r in data["rows"]:
-            value_text = f"{r['value']:.8f}"
-            if r.get("source") == "csv":
-                value_text += "  (csv)"
-            self.result_tree.insert(
-                "", "end",
-                values=(r["coef"], r["side"], value_text,
-                        f"{r['contrib']:+.8f}"),
-                tags=(r["tag"],))
-
-        self.result_tree.insert(
-            "", "end",
-            values=("", "Reactants", "",
-                    f"{data['reactants_sum']:.8f}"),
-            tags=("total",))
-        self.result_tree.insert(
-            "", "end",
-            values=("", "Products", "",
-                    f"{data['products_sum']:.8f}"),
-            tags=("total",))
-        self.result_tree.insert(
-            "", "end",
-            values=("", "Δ", "", f"{data['delta']:+.8f}"),
-            tags=("delta",))
-
         self._update_equation_banner(data)
-
-        lines = [
-            f"Reactants sum:  {data['reactants_sum']:+.8f}",
-            f"Products sum:   {data['products_sum']:+.8f}",
-            f"Δ (products − reactants) = {data['delta']:+.8f}",
-        ]
-        if data["missing"]:
-            lines.append(
-                f"Note: {len(data['missing'])} file(s) had no value "
-                f"for this quantity and were skipped.")
-        if self._locked_quantity_path:
-            lines.append(
-                "Note: quantity locked to the one loaded from the "
-                "reaction.")
-        self.summary_label.config(text="\n".join(lines))
-
-        self._result_autosize.autosize()
-        self._adjust_result_width()
-        self._result_grid.update()
 
     # ==================================================================
     # Saved reactions
@@ -797,7 +694,7 @@ class AnalysisWindow(tk.Toplevel):
     @staticmethod
     def _reaction_signature(r):
         settings_sig = tuple(sorted(
-            (k,
+            (_normalize_key(k),
              int(s.get("coef", 1) or 1),
              s.get("side", "Reactant"))
             for k, s in r.get("settings", {}).items()
@@ -975,8 +872,14 @@ class AnalysisWindow(tk.Toplevel):
             return
         r = self.store.reactions[idx]
 
-        loaded_settings = r.get("settings", {})
+        raw_settings = r.get("settings", {})
         path = r.get("quantity_path", "")
+
+        # Normalize keys to the current JSON's actual keys.
+        loaded_settings = {}
+        for raw_key, s in raw_settings.items():
+            real = self._find_existing_key(raw_key)
+            loaded_settings[real if real is not None else raw_key] = s
 
         self._extra_keys = set()
         self._row_values = {}
@@ -1043,11 +946,11 @@ class AnalysisWindow(tk.Toplevel):
     def _sync_favorites_from_reactions(self, silent=False):
         added = []
         for r in self.store.reactions:
-            for key in r.get("settings", {}).keys():
-                if (key in self.data.raw
-                        and key not in self._favorites_set):
-                    self._favorites_set.add(key)
-                    added.append(key)
+            for raw_key in r.get("settings", {}).keys():
+                real = self._find_existing_key(raw_key)
+                if real is not None and real not in self._favorites_set:
+                    self._favorites_set.add(real)
+                    added.append(real)
 
         if added:
             self.favorites = sorted(
@@ -1067,8 +970,28 @@ class AnalysisWindow(tk.Toplevel):
                 parent=self)
         return added
 
+    def _find_existing_key(self, key):
+        """Map a possibly cross-platform key to the exact key in the
+        currently loaded JSON, or return None if not found.
+
+        Tolerates '\\' vs '/' separators so a CSV created on Windows
+        still matches a JSON produced on macOS.
+        """
+        if key in self.data.raw:
+            return key
+
+        n = len(self.data.raw)
+        if (not hasattr(self, "_key_cache")
+                or self._key_cache_size != n):
+            cache = {}
+            for k in self.data.raw.keys():
+                cache[_normalize_key(k)] = k
+            self._key_cache = cache
+            self._key_cache_size = n
+        return self._key_cache.get(_normalize_key(key))
+
     # ==================================================================
-    # CSV export
+    # CSV export / import (reaction list)
     # ==================================================================
     _CSV_COLUMNS = [
         "Reaction", "Quantity", "Quantity Path", "File",
@@ -1100,8 +1023,10 @@ class AnalysisWindow(tk.Toplevel):
                     qpath = r.get("quantity_path", "")
                     settings = r.get("settings", {})
                     if not settings:
-                        w.writerow([name, q, qpath, "", "", "",
-                                    "", "",
+                        w.writerow([name, q, qpath,
+                                    _normalize_key(key), coef, side,
+                                    f"{value:.8f}",
+                                    f"{contrib:+.8f}",
                                     f"{r.get('reactants_sum', 0):.8f}",
                                     f"{r.get('products_sum', 0):.8f}",
                                     f"{r.get('delta', 0):+.8f}"])
@@ -1122,15 +1047,18 @@ class AnalysisWindow(tk.Toplevel):
                             value = s["value"]
 
                         if value is None:
-                            w.writerow([name, q, qpath, key, coef, side,
-                                        "", "",
+                            w.writerow([name, q, qpath,
+                                        _normalize_key(key), coef, side,
+                                        f"{value:.8f}",
+                                        f"{contrib:+.8f}",
                                         f"{r.get('reactants_sum', 0):.8f}",
                                         f"{r.get('products_sum', 0):.8f}",
                                         f"{r.get('delta', 0):+.8f}"])
                         else:
                             contrib = (-coef * value) \
                                 if side == "Reactant" else (coef * value)
-                            w.writerow([name, q, qpath, key, coef, side,
+                            w.writerow([name, q, qpath,
+                                        _normalize_key(key), coef, side,
                                         f"{value:.8f}",
                                         f"{contrib:+.8f}",
                                         f"{r.get('reactants_sum', 0):.8f}",
@@ -1141,9 +1069,6 @@ class AnalysisWindow(tk.Toplevel):
             return
         messagebox.showinfo("Export", f"Saved to:\n{path}", parent=self)
 
-    # ==================================================================
-    # CSV import
-    # ==================================================================
     def _import_csv(self):
         path = filedialog.askopenfilename(
             parent=self, title="Load reactions from CSV",
@@ -1238,6 +1163,14 @@ class AnalysisWindow(tk.Toplevel):
                 key = r[i_file].strip()
                 if not key:
                     continue
+
+                # Map the CSV key to the current JSON's real key so
+                # cross-platform separators (\ vs /) do not break the
+                # lookup.
+                real_key = self._find_existing_key(key)
+                if real_key is not None:
+                    key = real_key
+
                 coef = 1
                 if i_coef is not None and i_coef < len(r):
                     try:
@@ -1263,7 +1196,7 @@ class AnalysisWindow(tk.Toplevel):
                             pass
 
                 settings[key] = entry
-
+                
             candidate = {
                 "name": name,
                 "quantity_path": qpath,

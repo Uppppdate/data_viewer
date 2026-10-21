@@ -4,15 +4,19 @@ import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 from collections import OrderedDict
 
-from helpers import elide_left, MIN_LEFT_PANE_HARD, MIN_RIGHT_PANE_HARD
+from helpers import (elide_left, MIN_LEFT_PANE_HARD,
+                     MIN_RIGHT_PANE_HARD, load_recent_paths)
 from plot_window import open_plot_window
 from analysis_window import AnalysisWindow
 from temperature_window import TemperatureWindow
+from data_tabs import detect_kind, SeriesTab, NestedTab, GeneralTab
+from platform_utils import make_font, font_family, IS_MAC, is_f_key
 
 
 class MainWindow(ttk.Frame):
     def __init__(self, master, data, json_path,
-                 on_open_json, on_parse_logs):
+                 on_open_json, on_parse_logs,
+                 on_open_json_path=None):
         super().__init__(master)
         self.data = data
         self.current_key = None
@@ -23,6 +27,7 @@ class MainWindow(ttk.Frame):
         self._tree_kinds = {}
         self._header_full = "Current .log file: (none selected)"
         self._on_open_json = on_open_json
+        self._on_open_json_path = on_open_json_path
         self._on_parse_logs = on_parse_logs
 
         self._favorites = set()
@@ -33,15 +38,15 @@ class MainWindow(ttk.Frame):
 
         self._paned_dragging = False
 
-        self._tree_font = tkfont.Font(family="Segoe UI", size=10)
-        self._header_font = tkfont.Font(family="Segoe UI", size=10,
-                                        weight="bold")
-        self._title_font = tkfont.Font(family="Segoe UI", size=12,
-                                       weight="bold")
+        self._dynamic_tabs = {}
+
+        self._tree_font = make_font(10)
+        self._header_font = make_font(10, weight="bold")
+        self._title_font = make_font(12, weight="bold")
         try:
             self._tab_font = tkfont.nametofont("TkDefaultFont").copy()
         except Exception:
-            self._tab_font = tkfont.Font(family="Segoe UI", size=9)
+            self._tab_font = make_font(10)
 
         try:
             label_w = self._title_font.measure("Log files")
@@ -91,14 +96,35 @@ class MainWindow(ttk.Frame):
         ttk.Entry(bar, textvariable=self.search_var, width=30)\
             .pack(side=tk.LEFT)
 
-        ttk.Button(bar, text="Open JSON…",
-                   command=self._on_open_json).pack(side=tk.RIGHT)
+        self._open_btn = ttk.Menubutton(bar, text="Open JSON…")
+        self._open_btn.pack(side=tk.RIGHT)
+        self._rebuild_recent_menu()
+
         ttk.Button(bar, text="Parse files",
                    command=self._on_parse_logs).pack(
             side=tk.RIGHT, padx=(0, 6))
         ttk.Button(bar, text="Analysis…",
                    command=self._open_analysis).pack(
             side=tk.RIGHT, padx=(0, 6))
+
+    def _rebuild_recent_menu(self):
+        menu = tk.Menu(self._open_btn, tearoff=0)
+        menu.add_command(label="Browse…", command=self._on_open_json)
+        menu.add_separator()
+        paths = load_recent_paths()
+        if not paths:
+            menu.add_command(label="(no recent files)", state="disabled")
+        else:
+            for p in paths:
+                label = os.path.basename(p) + "  —  " + os.path.dirname(p)
+                menu.add_command(
+                    label=label,
+                    command=lambda pp=p: self._on_open_json_recent(pp))
+        self._open_btn["menu"] = menu
+
+    def _on_open_json_recent(self, path):
+        if self._on_open_json_path:
+            self._on_open_json_path(path)
 
     # ==================================================================
     # Main area
@@ -135,9 +161,10 @@ class MainWindow(ttk.Frame):
         ttk.Button(fav_row, text="☆ Clear favorites",
                    command=self._clear_favorites).pack(side=tk.LEFT,
                                                        padx=(4, 0))
-        ttk.Label(fav_row, text="Ctrl+F: toggle",
+        hint = "⌘F" if IS_MAC else "Ctrl+F"
+        ttk.Label(fav_row, text=f"{hint}: toggle",
                   foreground="#777",
-                  font=("Segoe UI", 9)).pack(side=tk.RIGHT)
+                  font=make_font(9)).pack(side=tk.RIGHT)
 
         tree_wrap = ttk.Frame(left)
         tree_wrap.pack(fill=tk.BOTH, expand=True)
@@ -179,15 +206,24 @@ class MainWindow(ttk.Frame):
         self.nb.add(self.tab_thermo, text="Thermochemistry")
         self._build_thermo_tab()
 
+        self.tab_general = ttk.Frame(self.nb)
+        self.nb.add(self.tab_general, text="General Data")
+        self._build_general_tab()
+
         self.after_idle(self._enforce_pane_limits)
 
-        # Ctrl+F toggles favorite for the selected log.
-        # IMPORTANT: no `add="+"`. Each new MainWindow replaces the
-        # previous binding on the root toplevel, so no dead handlers
-        # from destroyed frames can accumulate and break the chain.
-        top = self.winfo_toplevel()
-        top.bind("<Control-f>", self._toggle_favorite_selected)
-        top.bind("<Control-F>", self._toggle_favorite_selected)
+        # Ctrl/Cmd+F — layout-independent handler.
+        # Bind a single generic handler on the root; it will only act
+        # when the pressed physical key is F.
+        root = self.winfo_toplevel()
+        root.bind_all("<Command-KeyPress>", self._on_cmd_keypress)
+        root.bind_all("<Control-KeyPress>", self._on_cmd_keypress)
+
+    # ------------------------------------------------------------------
+    def _on_cmd_keypress(self, event=None):
+        if event is None or not is_f_key(event):
+            return None
+        return self._toggle_favorite_selected(event)
 
     # ==================================================================
     # Sash drag
@@ -443,8 +479,6 @@ class MainWindow(ttk.Frame):
         else:
             self._favorites.add(key)
 
-        prev_key = self.current_key
-
         try:
             yview = self.tree.yview()
         except tk.TclError:
@@ -453,14 +487,10 @@ class MainWindow(ttk.Frame):
         self._refresh_tree()
 
         target = None
-        if prev_key is not None and prev_key in self.data.raw:
-            target = prev_key
-            if prev_key in self._favorites:
-                fav_root = self._fav_root_iid()
-                if fav_root:
-                    fav_iid = "fav::" + prev_key
-                    if fav_iid in self.tree.get_children(fav_root):
-                        target = fav_iid
+        if key in self.data.raw:
+            target = key
+        elif self.current_key and self.current_key in self.data.raw:
+            target = self.current_key
 
         if target is not None:
             try:
@@ -498,16 +528,9 @@ class MainWindow(ttk.Frame):
             prev_key = self.current_key
             self._refresh_tree()
             if prev_key is not None and prev_key in self.data.raw:
-                target = prev_key
-                if prev_key in self._favorites:
-                    fav_root = self._fav_root_iid()
-                    if fav_root:
-                        fav_iid = "fav::" + prev_key
-                        if fav_iid in self.tree.get_children(fav_root):
-                            target = fav_iid
                 try:
-                    self.tree.selection_set(target)
-                    self.tree.focus(target)
+                    self.tree.selection_set(prev_key)
+                    self.tree.focus(prev_key)
                     self.tree.focus_set()
                 except tk.TclError:
                     pass
@@ -528,25 +551,29 @@ class MainWindow(ttk.Frame):
                 pass
         self._restore_open_states()
 
-    def _toggle_favorite_selected(self, event=None):
-        """Ctrl+F — toggles favorite for the currently selected log.
+    def _is_inside_self(self, widget):
+        w = widget
+        while w is not None:
+            if w is self:
+                return True
+            w = getattr(w, "master", None)
+        return False
 
-        This is bound directly on the root toplevel (see `_build_main`),
-        so it only fires when the event originates inside this window
-        (Tk delivers the event to the focused widget's toplevel; other
-        Toplevels like the Analysis window have their own bindtag chain
-        and never reach the root).
-        """
-        focused = self.focus_get()
-        if focused is not None:
-            cls = focused.winfo_class()
-            if cls in ("TEntry", "Entry", "Spinbox", "TSpinbox", "Text"):
+    def _toggle_favorite_selected(self, event=None):
+        if event is not None and event.widget is not None:
+            if not self._is_inside_self(event.widget):
+                return None
+            try:
+                cls = event.widget.winfo_class()
+            except (tk.TclError, AttributeError):
+                cls = ""
+            if cls in ("TEntry", "Entry", "TCombobox", "TSpinbox", "Text"):
                 return None
 
-        try:
-            sel = self.tree.selection()
-        except tk.TclError:
+        if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return "break"
+
+        sel = self.tree.selection()
         if not sel:
             return "break"
         iid = sel[0]
@@ -623,6 +650,10 @@ class MainWindow(ttk.Frame):
         self.freq_tree.tag_configure("normal", background="#ffffff")
 
         self.freq_tree.bind("<Button-3>", self._on_freq_right_click)
+        if IS_MAC:
+            self.freq_tree.bind("<Control-Button-1>",
+                                self._on_freq_right_click)
+
         self.freq_tree.bind(
             "<Configure>",
             lambda e: self._update_grid(self.freq_tree, table,
@@ -735,14 +766,15 @@ class MainWindow(ttk.Frame):
         self.thermo_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.thermo_tree.tag_configure(
-            "temp", background="#dbe7f3",
-            font=("Segoe UI", 10, "bold"))
+            "temp", background="#dbe7f3", font=make_font(10, weight="bold"))
         self.thermo_tree.tag_configure(
-            "cat", background="#eef3fa",
-            font=("Segoe UI", 10, "bold"))
+            "cat", background="#eef3fa", font=make_font(10, weight="bold"))
         self.thermo_tree.tag_configure("odd", background="#f7f7f7")
 
         self.thermo_tree.bind("<Button-3>", self._on_thermo_right_click)
+        if IS_MAC:
+            self.thermo_tree.bind("<Control-Button-1>",
+                                  self._on_thermo_right_click)
 
         self._thermo_seps = self._install_grid(self.thermo_tree, tree_wrap,
                                                ["#0"])
@@ -774,6 +806,37 @@ class MainWindow(ttk.Frame):
     def _restore_quantity_width(self, event=None):
         self._restore_quantity_width_soft(event)
         self.after_idle(self._update_thermo_grid)
+
+    # ==================================================================
+    # General Data + dynamic tabs
+    # ==================================================================
+    def _build_general_tab(self):
+        self.general_tab = GeneralTab(self.tab_general,
+                                      on_copy=self._show_toast)
+        self.general_tab.pack(fill=tk.BOTH, expand=True)
+
+    def _clear_dynamic_tabs(self):
+        for key in list(self._dynamic_tabs.keys()):
+            w = self._dynamic_tabs.pop(key)
+            try:
+                self.nb.forget(w)
+                w.destroy()
+            except tk.TclError:
+                pass
+
+    def _add_dynamic_tab(self, key, widget, label):
+        self.nb.add(widget, text=label)
+        self._dynamic_tabs[key] = widget
+
+    def _method_title(self, key):
+        try:
+            from orca_parser import METHODS_BY_KEY
+        except Exception:
+            METHODS_BY_KEY = {}
+        m = METHODS_BY_KEY.get(key)
+        if m:
+            return m["name"]
+        return key.replace("_", " ").title()
 
     # ==================================================================
     # Status bar
@@ -981,8 +1044,6 @@ class MainWindow(ttk.Frame):
         freqs = entry.get("vibrational_frequencies", []) or []
         n_real = sum(1 for f in freqs if f.get("frequency", 0) != 0)
         n_imag = sum(1 for f in freqs if f.get("frequency", 0) < 0)
-        th = entry.get("thermochemistry") or {}
-
         self._freq_data_cache = freqs
 
         if n_imag == 0:
@@ -997,10 +1058,40 @@ class MainWindow(ttk.Frame):
         self.freq_summary.config(text=summary)
 
         self._fill_freq(freqs)
-        self._fill_thermo(th)
-
         self.plot_btn.config(
             state=tk.NORMAL if n_real > 0 else tk.DISABLED)
+
+        th = entry.get("thermochemistry") or {}
+        self._fill_thermo(th)
+
+        self._clear_dynamic_tabs()
+        flat_groups = []
+
+        reserved = {"vibrational_frequencies",
+                    "has_negative_frequencies",
+                    "thermochemistry"}
+
+        for top_key, value in entry.items():
+            if top_key in reserved:
+                continue
+            title = self._method_title(top_key)
+            kind = detect_kind(value)
+
+            if kind == "series" and isinstance(value, list) and value:
+                tab = SeriesTab(self.nb, title, value,
+                                on_copy=self._show_toast)
+                self._add_dynamic_tab(top_key, tab, title)
+            elif kind == "nested" and isinstance(value, dict) and value:
+                tab = NestedTab(self.nb, title, value,
+                                on_copy=self._show_toast)
+                self._add_dynamic_tab(top_key, tab, title)
+            else:
+                if isinstance(value, dict):
+                    flat_groups.append((title, value))
+                elif value is not None:
+                    flat_groups.append((title, {"value": value}))
+
+        self.general_tab.populate(flat_groups)
 
     def _fill_freq(self, freqs):
         self.freq_tree.delete(*self.freq_tree.get_children(""))
